@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KML Linhas Viewer</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    html, body { height: 100%; }
+    #map { min-height: 100%; }
+    .leaflet-popup-content { margin: 12px; min-width: 180px; }
+    .selected-item { background-color: #eff6ff; border-color: #3b82f6; }
+    .sidebar-collapsed { width: 0 !important; overflow: hidden; padding: 0 !important; border: none !important; }
+    .sidebar-collapsed * { display: none; }
+    #sidebar { transition: width 0.3s ease; }
+    #sidebarToggleIcon { transition: transform 0.3s ease; display: inline-block; }
+  </style>
+</head>
+<body class="h-screen flex flex-col bg-gray-50 text-gray-800">
+
+  <!-- Cabeçalho -->
+  <header class="bg-blue-700 text-white p-3 shadow-md flex items-center justify-between gap-2 flex-wrap">
+    <div class="flex items-center gap-3">
+      <!-- Botão toggle sidebar -->
+      <button id="btnToggleSidebar"
+        class="w-9 h-9 flex items-center justify-center bg-blue-800 hover:bg-blue-900 rounded text-lg font-bold transition"
+        title="Ocultar / Mostrar painel lateral">
+        <span id="sidebarToggleIcon">◀</span>
+      </button>
+      <div>
+        <h1 class="text-lg font-bold leading-tight">KML Linhas Viewer</h1>
+        <p class="text-xs text-blue-100 hidden sm:block">Visualize polilinhas de KML e exporte para GPX</p>
+      </div>
+    </div>
+    <div class="flex flex-wrap gap-2">
+      <button id="btnLoadDefault"
+        class="px-3 py-2 bg-blue-800 hover:bg-blue-900 rounded text-sm font-medium transition">
+        Carregar tracks.kml
+      </button>
+      <button id="btnShowAll"
+        class="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded text-sm font-medium transition hidden"
+        title="Exibe todas as linhas novamente no mapa">
+        Mostrar todas
+      </button>
+      <button id="btnFitAll"
+        class="px-3 py-2 bg-white text-blue-700 hover:bg-gray-100 rounded text-sm font-medium transition">
+        Ver tudo
+      </button>
+      <button id="btnDownloadAll"
+        class="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 rounded text-sm font-medium transition">
+        Baixar GPX (todas)
+      </button>
+    </div>
+  </header>
+
+  <!-- Conteúdo principal -->
+  <div class="flex-1 flex overflow-hidden relative">
+
+    <!-- Painel lateral -->
+    <aside id="sidebar"
+      class="w-full md:w-96 bg-white border-r border-gray-200 flex flex-col shadow-sm z-10">
+      <!-- Instrução -->
+      <div class="px-4 pt-4 pb-2 border-b border-gray-200">
+        <p class="text-xs text-gray-500 leading-relaxed">
+          ℹ️ <strong>Seleção exclusiva:</strong> selecione uma linha para vê-la isoladamente.
+          Use <em>"Mostrar todas"</em> no cabeçalho para voltar à visão completa.
+        </p>
+      </div>
+      <!-- Controles -->
+      <div class="p-4 space-y-3 border-b border-gray-200">
+        <!--
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Carregar outro KML</label>
+          <input type="file" id="kmlInput" accept=".kml,.xml"
+            class="block w-full text-sm text-gray-600 file:mr-3 file:py-2 file:px-3 file:rounded file:border-0 file:text-sm file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
+        </div>
+        -->
+
+        <div class="grid grid-cols-1 gap-2">
+          <input type="text" id="filterInput" placeholder="Filtrar por nome..."
+            class="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" />
+          <select id="sortSelect"
+            class="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm">
+            <option value="name">Ordenar por nome</option>
+            <option value="points">Ordenar por pontos</option>
+            <option value="length">Ordenar por comprimento</option>
+          </select>
+        </div>
+
+        <div id="stats" class="text-xs text-gray-500">Nenhuma linha carregada</div>
+      </div>
+
+      <!-- Lista de linhas -->
+      <div class="flex-1 overflow-y-auto p-3">
+        <ul id="lineList" class="space-y-2">
+          <li class="text-center text-gray-500 py-8 text-sm">
+            Clique em <strong>Carregar tracks.kml</strong> ou selecione um arquivo.
+          </li>
+        </ul>
+      </div>
+    </aside>
+
+    <!-- Mapa -->
+    <main id="map" class="flex-1 relative"></main>
+
+    <!-- Indicador de seleção no canto do mapa -->
+    <div id="selectionBadge"
+      class="absolute bottom-4 left-4 z-[1000] bg-white/90 backdrop-blur border border-gray-300 rounded-lg px-3 py-2 text-sm shadow-md hidden">
+    </div>
+  </div>
+
+  <script>
+    // --- Variáveis globais ---
+    const KML_URL = 'https://raw.githubusercontent.com/GuilhermeJobs/LinhasRMTC/refs/heads/main/Linhas.kml';
+    let map;
+    let lines = [];
+    let layers = {};
+    let selectedId = null;     // null = todas visíveis; string = só uma visível
+    let sidebarVisible = true;
+
+    // --- Inicialização do mapa ---
+    function initMap() {
+      map = L.map('map', { zoomControl: false }).setView([-15.7, -47.9], 4);
+
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors',
+        maxZoom: 19
+      }).addTo(map);
+
+      L.control.zoom({ position: 'topright' }).addTo(map);
+    }
+
+    // --- Utilitários de parsing ---
+    function textOfFirst(parent, tag) {
+      const el = parent.getElementsByTagName(tag)[0];
+      return el ? el.textContent.trim() : '';
+    }
+
+    function kmlColorToHex(color) {
+      if (!color) return null;
+      if (color.startsWith('#')) return color;
+      color = color.trim().toLowerCase();
+      if (!/^[0-9a-f]{6,8}$/.test(color)) return null;
+      if (color.length === 8) color = color.substring(2);
+      const rr = color.substring(4, 6);
+      const gg = color.substring(2, 4);
+      const bb = color.substring(0, 2);
+      return '#' + rr + gg + bb;
+    }
+
+    function parseStyles(doc) {
+      const styles = {};
+      const styleEls = doc.getElementsByTagName('Style');
+      for (const el of styleEls) {
+        const id = el.getAttribute('id');
+        if (!id) continue;
+        const color = kmlColorToHex(textOfFirst(el, 'color'));
+        const width = parseFloat(textOfFirst(el, 'width')) || 4;
+        styles['#' + id] = { color: color || '#3388ff', width };
+      }
+
+      const mapEls = doc.getElementsByTagName('StyleMap');
+      for (const el of mapEls) {
+        const id = el.getAttribute('id');
+        if (!id) continue;
+        const pairs = el.getElementsByTagName('Pair');
+        for (const pair of pairs) {
+          if (textOfFirst(pair, 'key') === 'normal') {
+            const styleUrl = textOfFirst(pair, 'styleUrl');
+            if (styleUrl && styles[styleUrl]) {
+              styles['#' + id] = styles[styleUrl];
+            }
+          }
+        }
+      }
+      return styles;
+    }
+
+    function parseCoordinates(text) {
+      const coords = [];
+      if (!text) return coords;
+      const parts = text.trim().split(/\s+/);
+      for (const part of parts) {
+        if (!part) continue;
+        const [lon, lat, alt] = part.split(',');
+        if (lat == null || lon == null) continue;
+        const obj = { lat: parseFloat(lat), lon: parseFloat(lon) };
+        const altNum = parseFloat(alt);
+        if (!isNaN(altNum)) obj.alt = altNum;
+        coords.push(obj);
+      }
+      return coords;
+    }
+
+    function computeLength(coords) {
+      let total = 0;
+      const R = 6371000;
+      for (let i = 1; i < coords.length; i++) {
+        const a = coords[i - 1], b = coords[i];
+        const dLat = (b.lat - a.lat) * Math.PI / 180;
+        const dLon = (b.lon - a.lon) * Math.PI / 180;
+        const lat1 = a.lat * Math.PI / 180;
+        const lat2 = b.lat * Math.PI / 180;
+        const aa = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+        const c = 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa));
+        total += R * c;
+      }
+      return total;
+    }
+
+    // --- Parse do KML ---
+    function parseKml(text) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(text, 'application/xml');
+      const error = doc.querySelector('parsererror');
+      if (error) throw new Error('XML inválido: ' + error.textContent);
+
+      const styles = parseStyles(doc);
+      const placemarks = doc.getElementsByTagName('Placemark');
+      const result = [];
+      let idCounter = 1;
+
+      for (const p of placemarks) {
+        const name = textOfFirst(p, 'name') || 'Sem nome';
+        const description = textOfFirst(p, 'description');
+        const styleUrl = textOfFirst(p, 'styleUrl');
+
+        let color = '#3388ff';
+        let width = 4;
+        if (styleUrl && styles[styleUrl]) {
+          color = styles[styleUrl].color;
+          width = styles[styleUrl].width;
+        }
+
+        const lineStrings = p.getElementsByTagName('LineString');
+        for (let i = 0; i < lineStrings.length; i++) {
+          const ls = lineStrings[i];
+          const coordsEl = ls.getElementsByTagName('coordinates')[0];
+          if (!coordsEl) continue;
+
+          const coords = parseCoordinates(coordsEl.textContent);
+          if (coords.length < 2) continue;
+
+          const segName = lineStrings.length > 1
+            ? `${name} (${i + 1}/${lineStrings.length})`
+            : name;
+
+          result.push({
+            id: 'line-' + idCounter++,
+            placemarkName: name,
+            name: segName,
+            description,
+            color,
+            width,
+            coords,
+            points: coords.length,
+            length: computeLength(coords)
+          });
+        }
+      }
+
+      return result;
+    }
+
+    // --- Formatação ---
+    function formatLength(m) {
+      if (m >= 1000) return (m / 1000).toFixed(2) + ' km';
+      return Math.round(m) + ' m';
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function escapeXml(text) {
+      return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+    }
+
+    function sanitizeFilename(name) {
+      return name.replace(/[^a-zA-Z0-9\u00C0-\u00FF _-]/g, '').replace(/\s+/g, '_').substring(0, 50) || 'linha';
+    }
+
+    // --- Exibição no mapa (respeita seleção exclusiva) ---
+    function renderMap() {
+      // Remove todas as camadas antigas
+      Object.values(layers).forEach(l => map.removeLayer(l));
+      layers = {};
+
+      if (!lines.length) return;
+
+      if (selectedId === null) {
+        // MODO TODAS: exibe todas as linhas
+        const group = [];
+        lines.forEach(line => {
+          const latlngs = line.coords.map(c => [c.lat, c.lon]);
+          const poly = L.polyline(latlngs, {
+            color: line.color,
+            weight: line.width,
+            opacity: 0.9
+          }).addTo(map);
+
+          poly.bindPopup(`
+            <div>
+              <h3 class="font-bold text-gray-900">${escapeHtml(line.name)}</h3>
+              ${line.description ? `<p class="text-sm text-gray-600 mt-1">${escapeHtml(line.description)}</p>` : ''}
+              <p class="text-xs text-gray-500 mt-2">${line.points} pontos · ${formatLength(line.length)}</p>
+            </div>
+          `);
+
+          layers[line.id] = poly;
+          group.push(poly);
+        });
+
+        if (group.length) {
+          const fg = L.featureGroup(group);
+          map.fitBounds(fg.getBounds(), { padding: [20, 20], maxZoom: 14 });
+        }
+
+        hideSelectionBadge();
+      } else {
+        // MODO ÚNICO: exibe apenas a linha selecionada
+        const line = lines.find(l => l.id === selectedId);
+        if (!line) return;
+
+        const latlngs = line.coords.map(c => [c.lat, c.lon]);
+        const poly = L.polyline(latlngs, {
+          color: line.color,
+          weight: Math.max(line.width, 5),
+          opacity: 1
+        }).addTo(map);
+
+        poly.bindPopup(`
+          <div>
+            <h3 class="font-bold text-gray-900">${escapeHtml(line.name)}</h3>
+            ${line.description ? `<p class="text-sm text-gray-600 mt-1">${escapeHtml(line.description)}</p>` : ''}
+            <p class="text-xs text-gray-500 mt-2">${line.points} pontos · ${formatLength(line.length)}</p>
+          </div>
+        `);
+
+        layers[line.id] = poly;
+
+        // Destaca no mapa com zoom
+        map.fitBounds(poly.getBounds(), { padding: [40, 40], maxZoom: 16 });
+        poly.openPopup();
+
+        showSelectionBadge(line);
+      }
+
+      // Atualiza estado do botão "Mostrar todas"
+      document.getElementById('btnShowAll').classList.toggle('hidden', selectedId === null);
+    }
+
+    function showSelectionBadge(line) {
+      const badge = document.getElementById('selectionBadge');
+      badge.innerHTML = `
+        <span class="font-semibold">Selecionada:</span>
+        <span class="ml-1">${escapeHtml(line.name)}</span>
+        <button id="btnBadgeClear" class="ml-2 text-blue-600 hover:text-blue-800 underline text-xs font-medium">
+          Limpar seleção
+        </button>
+      `;
+      badge.classList.remove('hidden');
+      // Evento para limpar seleção
+      setTimeout(() => {
+        const clearBtn = document.getElementById('btnBadgeClear');
+        if (clearBtn) clearBtn.addEventListener('click', clearSelection);
+      }, 0);
+    }
+
+    function hideSelectionBadge() {
+      document.getElementById('selectionBadge').classList.add('hidden');
+    }
+
+    function clearSelection() {
+      selectedId = null;
+      renderList();
+      renderMap();
+    }
+
+    // --- Renderização da lista ---
+    function renderList() {
+      const filter = document.getElementById('filterInput').value.toLowerCase();
+      const sort = document.getElementById('sortSelect').value;
+
+      let filtered = lines.filter(l => l.name.toLowerCase().includes(filter));
+
+      filtered.sort((a, b) => {
+        if (sort === 'name') return a.name.localeCompare(b.name);
+        if (sort === 'points') return a.points - b.points;
+        if (sort === 'length') return a.length - b.length;
+        return 0;
+      });
+
+      const list = document.getElementById('lineList');
+      list.innerHTML = '';
+
+      if (!filtered.length) {
+        list.innerHTML = '<li class="text-center text-gray-500 py-4">Nenhuma linha encontrada</li>';
+      } else {
+        filtered.forEach(line => {
+          const isSelected = line.id === selectedId;
+          const li = document.createElement('li');
+          li.className = `p-3 rounded-lg border transition cursor-pointer ${
+            isSelected
+              ? 'selected-item ring-2 ring-blue-400'
+              : 'border-gray-200 hover:bg-gray-50'
+          }`;
+          li.innerHTML = `
+            <div class="flex items-start gap-2">
+              <span class="w-3 h-3 rounded-full mt-1 flex-shrink-0" style="background:${line.color}"></span>
+              <div class="flex-1 min-w-0">
+                <h3 class="font-semibold text-gray-800 text-sm truncate" title="${escapeHtml(line.name)}">
+                  ${escapeHtml(line.name)}
+                </h3>
+                <p class="text-xs text-gray-500 mt-0.5">
+                  ${line.points} pontos · ${formatLength(line.length)}
+                </p>
+                ${isSelected ? '<span class="text-xs text-blue-600 font-medium">✓ Em exibição</span>' : ''}
+              </div>
+            </div>
+            <div class="mt-2 flex gap-2" onclick="event.stopPropagation()">
+              <button data-id="${line.id}" class="btn-zoom px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition">
+                ${isSelected ? 'Expandir novamente' : 'Selecionar'}
+              </button>
+              <button data-id="${line.id}" class="btn-gpx px-2 py-1 text-xs bg-emerald-600 text-white rounded hover:bg-emerald-700 transition">
+                GPX
+              </button>
+            </div>
+          `;
+          li.addEventListener('click', (e) => {
+            if (!e.target.closest('button')) selectLine(line.id);
+          });
+          list.appendChild(li);
+        });
+      }
+
+      document.getElementById('stats').textContent =
+        `${filtered.length} de ${lines.length} linha(s) exibida(s)`;
+    }
+
+    function selectLine(id) {
+      selectedId = id;
+      renderList();
+      renderMap();
+    }
+
+    // --- Carregamento ---
+    function loadData(text) {
+      try {
+        lines = parseKml(text);
+        selectedId = null;
+        document.getElementById('btnShowAll').classList.add('hidden');
+        hideSelectionBadge();
+        renderList();
+        renderMap();
+      } catch (err) {
+        alert('Erro ao processar KML: ' + err.message);
+      }
+    }
+
+    // --- GPX ---
+    function buildGpx(linesToExport, trackName) {
+      const xml = [];
+      xml.push('<?xml version="1.0" encoding="UTF-8"?>');
+      xml.push('<gpx xmlns="http://www.topografix.com/GPX/1/1" version="1.1" creator="KML Linhas Viewer">');
+      xml.push(`  <metadata><name>${escapeXml(trackName)}</name></metadata>`);
+
+      linesToExport.forEach(line => {
+        xml.push('  <trk>');
+        xml.push(`    <name>${escapeXml(line.name)}</name>`);
+        if (line.description) xml.push(`    <desc>${escapeXml(line.description)}</desc>`);
+        xml.push('    <trkseg>');
+        line.coords.forEach(c => {
+          const ele = c.alt !== undefined ? `<ele>${c.alt}</ele>` : '';
+          xml.push(`      <trkpt lat="${c.lat}" lon="${c.lon}">${ele}</trkpt>`);
+        });
+        xml.push('    </trkseg>');
+        xml.push('  </trk>');
+      });
+
+      xml.push('</gpx>');
+      return xml.join('\n');
+    }
+
+    function download(text, filename, type) {
+      const blob = new Blob([text], { type: type + ';charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    function downloadAllGpx() {
+      if (!lines.length) return alert('Nenhuma linha para exportar.');
+      const xml = buildGpx(lines, 'Todas as linhas');
+      download(xml, 'linhas.gpx', 'application/gpx+xml');
+    }
+
+    function downloadSingleGpx(id) {
+      const line = lines.find(l => l.id === id);
+      if (!line) return;
+      const xml = buildGpx([line], line.name);
+      download(xml, sanitizeFilename(line.name) + '.gpx', 'application/gpx+xml');
+    }
+
+    // --- Toggle sidebar ---
+    function toggleSidebar() {
+      const sidebar = document.getElementById('sidebar');
+      const icon = document.getElementById('sidebarToggleIcon');
+      sidebarVisible = !sidebarVisible;
+
+      if (sidebarVisible) {
+        sidebar.classList.remove('sidebar-collapsed');
+        icon.textContent = '◀';
+      } else {
+        sidebar.classList.add('sidebar-collapsed');
+        icon.textContent = '▶';
+      }
+
+      // Redimensiona o mapa após a transição
+      setTimeout(() => map.invalidateSize(), 350);
+    }
+
+    // --- Eventos ---
+    function setupEvents() {
+      document.getElementById('btnLoadDefault').addEventListener('click', async () => {
+        try {
+          const btn = document.getElementById('btnLoadDefault');
+          const originalText = btn.textContent;
+          btn.textContent = 'Carregando...';
+          btn.disabled = true;
+
+          const res = await fetch(KML_URL);
+          if (!res.ok) throw new Error('Falha ao baixar (' + res.status + ')');
+          const text = await res.text();
+          loadData(text);
+
+          btn.textContent = originalText;
+          btn.disabled = false;
+        } catch (err) {
+          alert('Erro ao carregar o KML do GitHub:\n' + err.message);
+        }
+      });
+
+
+      document.getElementById('kmlInput').addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => loadData(reader.result);
+        reader.readAsText(file);
+      });
+
+      document.getElementById('filterInput').addEventListener('input', renderList);
+      document.getElementById('sortSelect').addEventListener('change', renderList);
+
+      document.getElementById('btnDownloadAll').addEventListener('click', downloadAllGpx);
+
+      document.getElementById('btnFitAll').addEventListener('click', () => {
+        const group = Object.values(layers);
+        if (group.length) {
+          map.fitBounds(L.featureGroup(group).getBounds(), { padding: [20, 20], maxZoom: 14 });
+        }
+      });
+
+      document.getElementById('btnShowAll').addEventListener('click', clearSelection);
+
+      document.getElementById('btnToggleSidebar').addEventListener('click', toggleSidebar);
+
+      document.getElementById('lineList').addEventListener('click', (e) => {
+        const btn = e.target.closest('button');
+        if (!btn) return;
+        const id = btn.dataset.id;
+        if (btn.classList.contains('btn-zoom')) selectLine(id);
+        if (btn.classList.contains('btn-gpx')) downloadSingleGpx(id);
+      });
+    }
+
+    // --- Inicialização ---
+    initMap();
+    setupEvents();
+  </script>
+</body>
+</html>
